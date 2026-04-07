@@ -1,0 +1,137 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a0c;
+  --bg-elevated: #0e0e12;
+  --surface: #111116;
+  --surface2: #1a1a22;
+  --surface3: #22222c;
+  --border: #25252f;
+  --border2: #32323e;
+  --text: #e8e8f0;
+  --text-dim: #7a7a90;
+  --text-muted: #44445a;
+  --accent: #6ee7b7;
+  --accent-dim: rgba(110, 231, 183, 0.12);
+  --accent2: #818cf8;
+  --accent2-dim: rgba(129, 140, 248, 0.15);
+  --accent3: #f472b6;
+  --danger: #f87171;
+  --warn: #fbbf24;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-soft: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -30%, rgba(129, 140, 248, 0.08), transparent 55%),
+    radial-gradient(ellipse 90% 60% at 100% 0%, rgba(110, 231, 183, 0.05), transparent 45%);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(129, 140, 248, 0.35);
+  color: var(--text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent2);
+  outline-offset: 2px;
+}
+
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Chat workspace: full light shell (toggled from ChatWorkspace) */
+html.root-chat-light,
+html.root-chat-light body,
+html.root-chat-light #root {
+  background: #ffffff;
+  background-image: none;
+  color: #18181b;
+}
+
+html.root-chat-dark,
+html.root-chat-dark body,
+html.root-chat-dark #root {
+  background: #0a0a0c;
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -30%, rgba(129, 140, 248, 0.08), transparent 55%),
+    radial-gradient(ellipse 90% 60% at 100% 0%, rgba(110, 231, 183, 0.05), transparent 45%);
+  color: #e8e8f0;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* Markdown styles */
+.markdown h1, .markdown h2, .markdown h3 {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  margin-top: 1rem;
+}
+.markdown h1 { font-size: 1.3rem; }
+.markdown h2 { font-size: 1.1rem; }
+.markdown h3 { font-size: 1rem; color: var(--accent); }
+.markdown p { line-height: 1.7; margin-bottom: 0.75rem; font-size: 0.875rem; }
+.markdown ul, .markdown ol { padding-left: 1.5rem; margin-bottom: 0.75rem; font-size: 0.875rem; }
+.markdown li { margin-bottom: 0.25rem; line-height: 1.6; }
+.markdown code {
+  font-family: var(--font-mono);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+.markdown pre {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+}
+.markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.markdown a { color: var(--accent2); text-decoration: underline; }
+.markdown table { width: 100%; border-collapse: collapse; margin-bottom: 0.75rem; font-size: 0.8rem; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 0.4rem 0.75rem; text-align: left; }
+.markdown th { background: var(--surface2); color: var(--accent); font-weight: 600; }
+.markdown blockquote { border-left: 2px solid var(--accent2); padding-left: 1rem; color: var(--text-dim); font-style: italic; }
+
+.markdown hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border2), transparent);
+  margin: 1.25rem 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

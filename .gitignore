@@ -1,0 +1,9 @@
+node_modules/
+.env
+dist/
+# Google OAuth client downloads (contain client_secret)
+client_secret*.json
+**/client_secret*.json
+credentials.json
+.DS_Store
+*.log
