@@ -47,8 +47,12 @@ app.get("/health", (_, res) => {
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.join(__dirname, "public");
-if (process.env.NODE_ENV === "production" && fs.existsSync(publicDir)) {
+// Build copies Vite output to backend/public (next to src/), not backend/src/public
+const publicDir = path.join(__dirname, "..", "public");
+const serveSpa =
+  fs.existsSync(publicDir) &&
+  (process.env.NODE_ENV === "production" || process.env.RENDER === "true");
+if (serveSpa) {
   app.use(express.static(publicDir));
   app.use((req, res, next) => {
     if (req.method !== "GET" && req.method !== "HEAD") return next();
