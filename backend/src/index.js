@@ -18,7 +18,16 @@ import { attachVoiceWebSocket } from "./voice/attachVoiceWebSocket.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:5173" }));
+/** CORS: explicit FRONTEND_URL, else Render’s automatic RENDER_EXTERNAL_URL, else local dev. */
+function corsOrigin() {
+  const explicit = process.env.FRONTEND_URL?.trim();
+  if (explicit) return explicit;
+  const render = process.env.RENDER_EXTERNAL_URL?.trim();
+  if (render) return render;
+  return "http://localhost:5173";
+}
+
+app.use(cors({ origin: corsOrigin() }));
 app.use(express.json({ limit: "2mb" }));
 
 // Routes (public)
