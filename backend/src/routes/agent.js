@@ -99,6 +99,9 @@ agentRouter.post("/chat", async (req, res) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
+  // SSE comment pings keep proxies from treating long OpenAI + MCP runs as idle (Render, etc.)
+  let heartbeat = null;
+
   try {
     if (ids.length > 0 && attachments.length === 0) {
       send("status", {
@@ -107,6 +110,15 @@ agentRouter.post("/chat", async (req, res) => {
       });
     }
     send("status", { message: "Working…" });
+
+    heartbeat = setInterval(() => {
+      try {
+        res.write(`: keepalive ${Date.now()}\n\n`);
+      } catch {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+    }, 15000);
 
     const result = await runAgent(
       messages,
@@ -139,5 +151,7 @@ agentRouter.post("/chat", async (req, res) => {
     console.error("Agent error:", err);
     send("error", { message: err.message });
     res.end();
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
 });
