@@ -24,6 +24,8 @@ const __mcpDir = path.dirname(fileURLToPath(import.meta.url));
 const googleWorkspaceMcpPath = path.resolve(__mcpDir, "google-workspace-mcp/index.js");
 const whatsappCloudMcpPath = path.resolve(__mcpDir, "whatsapp-cloud-mcp/index.js");
 const richPptMcpPath = path.resolve(__mcpDir, "rich-ppt-mcp/index.js");
+/** Bundled path — avoids `npx -y` on Render (slow / times out MCP handshake). */
+const githubMcpServerPath = require.resolve("@modelcontextprotocol/server-github/dist/index.js");
 
 /** @param {string} key */
 function envTruthy(key) {
@@ -46,8 +48,8 @@ const INTEGRATIONS = [
     icon: "🐙",
     publicDescription:
       "Search repositories, triage issues, and reason about pull requests and code without leaving your workspace.",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-github"],
+    command: process.execPath,
+    args: [githubMcpServerPath],
     enabled: () => !envFlagOn("GITHUB_MCP_DISABLE"),
     requiredEnv: ["GITHUB_TOKEN"],
     buildEnv: () => ({
@@ -278,6 +280,8 @@ class MCPClientManager {
     /** @type {Map<string, { reason: string, missing?: string[] }>} */
     this.skipped = new Map();
     this.initialized = false;
+    /** @type {Promise<void> | null} */
+    this._initPromise = null;
   }
 
   /** Human-readable hint when an opt-in integration is off (for logs + debugging). */
@@ -339,26 +343,38 @@ class MCPClientManager {
 
   async init() {
     if (this.initialized) return;
-
-    console.log("🔌 Initializing MCP servers...");
-    this.skipped.clear();
-
-    for (const def of INTEGRATIONS) {
-      const { skip, reason, missing, hint } = this._shouldSkip(def);
-      if (skip) {
-        this.skipped.set(def.key, { reason, missing });
-        const extra =
-          reason === "missing_env" && missing?.length
-            ? ` — need env: ${missing.join(", ")}`
-            : hint || "";
-        console.log(`  ⏭️  ${def.icon} ${def.label}: skipped (${reason})${extra}`);
-        continue;
-      }
-      await this._connect(def);
+    if (this._initPromise) {
+      await this._initPromise;
+      return;
     }
 
-    this.initialized = true;
-    console.log(`✅ MCP ready — ${this.servers.size} server(s) connected`);
+    this._initPromise = (async () => {
+      console.log("🔌 Initializing MCP servers...");
+      this.skipped.clear();
+
+      for (const def of INTEGRATIONS) {
+        const { skip, reason, missing, hint } = this._shouldSkip(def);
+        if (skip) {
+          this.skipped.set(def.key, { reason, missing });
+          const extra =
+            reason === "missing_env" && missing?.length
+              ? ` — need env: ${missing.join(", ")}`
+              : hint || "";
+          console.log(`  ⏭️  ${def.icon} ${def.label}: skipped (${reason})${extra}`);
+          continue;
+        }
+        await this._connect(def);
+      }
+
+      this.initialized = true;
+      console.log(`✅ MCP ready — ${this.servers.size} server(s) connected`);
+    })();
+
+    try {
+      await this._initPromise;
+    } finally {
+      this._initPromise = null;
+    }
   }
 
   async _connect(def) {
