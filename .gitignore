@@ -1,6 +1,7 @@
 node_modules/
 .env
 dist/
+backend/public/
 # Google OAuth client downloads (contain client_secret)
 client_secret*.json
 **/client_secret*.json
