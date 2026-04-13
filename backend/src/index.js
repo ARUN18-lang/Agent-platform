@@ -1,4 +1,7 @@
 import "dotenv/config";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import { agentRouter } from "./routes/agent.js";
@@ -33,6 +36,17 @@ app.use("/api/sessions", requireAuth, sessionsRouter);
 app.get("/health", (_, res) => {
   res.json({ status: "ok", version: "1.0.0", storage: process.env.MONGODB_URI ? "mongo" : "off" });
 });
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(__dirname, "public");
+if (process.env.NODE_ENV === "production" && fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+    if (req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(publicDir, "index.html"), (err) => (err ? next(err) : undefined));
+  });
+}
 
 await connectMongo();
 
