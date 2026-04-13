@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { authHeaders } from "../api.js";
+import { getToken } from "../auth.js";
 import MermaidBlock from "./MermaidBlock.jsx";
 import "./ChatPanel.css";
 
@@ -93,6 +94,20 @@ function PresentationDownloadBar({ attachments }) {
       ) : null}
     </div>
   );
+}
+
+/** @param {Blob} blob */
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result || "");
+      const i = s.indexOf(",");
+      resolve(i >= 0 ? s.slice(i + 1) : s);
+    };
+    r.onerror = () => reject(new Error("Could not read recording"));
+    r.readAsDataURL(blob);
+  });
 }
 
 const EXAMPLE_PROMPTS = [
@@ -334,6 +349,19 @@ function SendIcon() {
   );
 }
 
+function IconMic() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.75">
+      <path
+        d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M19 11a7 7 0 01-14 0M12 18v3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function IconCopy() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="2">
@@ -454,6 +482,31 @@ export default function ChatPanel({
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const msgIdRef = useRef(0);
+  const voiceStreamIdRef = useRef(
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `vs-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  );
+  const voiceSegmentIndexRef = useRef(0);
+  const voiceWsRef = useRef(null);
+  const voiceWsConnectPromiseRef = useRef(null);
+  const voiceWsSubscribedRef = useRef(false);
+  /** @type {React.MutableRefObject<{ segmentIndex: number, timer: ReturnType<typeof setTimeout> } | null>} */
+  const voicePendingRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  /** @type {React.MutableRefObject<Blob[]>} */
+  const mediaChunksRef = useRef([]);
+  const micStreamRef = useRef(null);
+  const stopRecordingRef = useRef(() => {});
+  const onVoiceServerMessageRef = useRef(() => {});
+  /** Set after `sendMessage` is defined each render — used by voice auto-send. */
+  const sendMessageRef = useRef(
+    /** @type {(t?: string | null, o?: { preserveComposer?: boolean }) => Promise<void>} */ (async () => {})
+  );
+
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceError, setVoiceError] = useState(null);
 
   const nextMsgId = useCallback(() => {
     msgIdRef.current += 1;
@@ -469,6 +522,321 @@ export default function ChatPanel({
     },
     [onConversationUpdated]
   );
+
+  const clearVoicePending = useCallback(() => {
+    const p = voicePendingRef.current;
+    if (p?.timer) clearTimeout(p.timer);
+    voicePendingRef.current = null;
+    setVoiceBusy(false);
+  }, []);
+
+  const dispatchVoiceTranscript = useCallback((text) => {
+    const t = String(text || "").trim();
+    if (!t) return;
+    void sendMessageRef.current(t, { preserveComposer: true });
+  }, []);
+
+  const onVoiceServerMessage = useCallback(
+    (m) => {
+      if (!m || typeof m !== "object") return;
+      if (m.type === "ready" || m.type === "pong" || m.type === "segment_accepted") return;
+      if (m.type === "transcript") {
+        const pending = voicePendingRef.current;
+        if (pending && Number(m.segmentIndex) !== pending.segmentIndex) return;
+        const t = String(m.text || "").trim();
+        if (!t) {
+          clearVoicePending();
+          return;
+        }
+        if (isRunning) {
+          setVoiceError("Wait for the assistant to finish, then try voice again.");
+          clearVoicePending();
+          return;
+        }
+        if (pendingFiles.some((p) => p.uploading)) {
+          setVoiceError("Wait for file uploads to finish before using voice.");
+          clearVoicePending();
+          return;
+        }
+        dispatchVoiceTranscript(t);
+        clearVoicePending();
+        return;
+      }
+      if (m.type === "transcript_error") {
+        const pending = voicePendingRef.current;
+        if (pending && Number(m.segmentIndex) !== pending.segmentIndex) return;
+        setVoiceError(m.message || "Voice processing failed");
+        clearVoicePending();
+        return;
+      }
+      if (m.type === "error") {
+        setVoiceError(m.message || "Voice error");
+        clearVoicePending();
+      }
+    },
+    [clearVoicePending, dispatchVoiceTranscript, isRunning, pendingFiles]
+  );
+
+  useEffect(() => {
+    onVoiceServerMessageRef.current = onVoiceServerMessage;
+  }, [onVoiceServerMessage]);
+
+  const connectVoiceWebSocket = useCallback(() => {
+    const streamId = voiceStreamIdRef.current;
+    const existing = voiceWsRef.current;
+    if (existing?.readyState === WebSocket.OPEN && voiceWsSubscribedRef.current) {
+      return Promise.resolve(existing);
+    }
+    if (voiceWsConnectPromiseRef.current) {
+      return voiceWsConnectPromiseRef.current;
+    }
+    const token = getToken();
+    if (!token?.trim()) {
+      return Promise.reject(new Error("Sign in to use voice input"));
+    }
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${window.location.host}/api/agent/voice/ws?token=${encodeURIComponent(token.trim())}`;
+
+    voiceWsConnectPromiseRef.current = new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      let settled = false;
+      const finish = (fn) => {
+        if (!settled) {
+          settled = true;
+          voiceWsConnectPromiseRef.current = null;
+          fn();
+        }
+      };
+      const t = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        finish(() => reject(new Error("Voice connection timed out")));
+      }, 15000);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: "subscribe", streamId }));
+      };
+
+      ws.onmessage = (ev) => {
+        let m;
+        try {
+          m = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (m.type === "subscribed") {
+          clearTimeout(t);
+          voiceWsSubscribedRef.current = true;
+          voiceWsRef.current = ws;
+          finish(() => resolve(ws));
+        }
+        if (m.type === "error" && !voiceWsSubscribedRef.current) {
+          clearTimeout(t);
+          finish(() => reject(new Error(m.message || "Voice rejected")));
+        }
+        onVoiceServerMessageRef.current(m);
+      };
+
+      ws.onerror = () => {
+        clearTimeout(t);
+        finish(() => reject(new Error("Voice WebSocket failed")));
+      };
+
+      ws.onclose = () => {
+        clearTimeout(t);
+        voiceWsRef.current = null;
+        voiceWsSubscribedRef.current = false;
+        if (!settled) {
+          finish(() => reject(new Error("Voice connection closed")));
+        }
+      };
+    });
+
+    return voiceWsConnectPromiseRef.current;
+  }, []);
+
+  const sendVoiceViaRest = useCallback(
+    async (blob, mimeType, segmentIndex) => {
+      const fd = new FormData();
+      fd.append("file", blob, "recording.webm");
+      fd.append("streamId", voiceStreamIdRef.current);
+      fd.append("segmentIndex", String(segmentIndex));
+      const res = await fetch("/api/agent/voice/segment", {
+        method: "POST",
+        headers: { ...authHeaders() },
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || res.statusText || `HTTP ${res.status}`);
+
+      const id = data.id;
+      if (!id) throw new Error("No segment id");
+
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const s = await fetch(`/api/agent/voice/segment/${encodeURIComponent(id)}`, {
+          headers: { ...authHeaders() },
+        });
+        const j = await s.json().catch(() => ({}));
+        if (!s.ok) throw new Error(j?.error || "Status check failed");
+        if (j.status === "done") {
+          const t = String(j.transcriptEn || "").trim();
+          if (!t) return;
+          if (isRunning) {
+            setVoiceError("Wait for the assistant to finish, then try voice again.");
+            return;
+          }
+          if (pendingFiles.some((p) => p.uploading)) {
+            setVoiceError("Wait for file uploads to finish before using voice.");
+            return;
+          }
+          dispatchVoiceTranscript(t);
+          return;
+        }
+        if (j.status === "error") throw new Error(j.error || "Transcription failed");
+      }
+      throw new Error("Voice processing timed out");
+    },
+    [dispatchVoiceTranscript, isRunning, pendingFiles]
+  );
+
+  const sendVoiceBlob = useCallback(
+    async (blob, mimeType) => {
+      const segmentIndex = voiceSegmentIndexRef.current;
+      voiceSegmentIndexRef.current += 1;
+      setVoiceBusy(true);
+      setVoiceError(null);
+      const timer = setTimeout(() => {
+        voicePendingRef.current = null;
+        setVoiceBusy(false);
+        setVoiceError("Voice processing timed out");
+      }, 60000);
+      voicePendingRef.current = { segmentIndex, timer };
+
+      try {
+        const ws = await connectVoiceWebSocket();
+        const b64 = await blobToBase64(blob);
+        ws.send(
+          JSON.stringify({
+            type: "segment",
+            streamId: voiceStreamIdRef.current,
+            segmentIndex,
+            mimeType: mimeType || "audio/webm",
+            data: b64,
+          })
+        );
+      } catch (e) {
+        try {
+          await sendVoiceViaRest(blob, mimeType || "audio/webm", segmentIndex);
+          clearVoicePending();
+        } catch (e2) {
+          clearVoicePending();
+          setVoiceError(e2?.message || e?.message || "Voice upload failed");
+        }
+      }
+    },
+    [clearVoicePending, connectVoiceWebSocket, sendVoiceViaRest]
+  );
+
+  const stopVoiceRecording = useCallback(() => {
+    setVoiceRecording(false);
+    const mr = mediaRecorderRef.current;
+    if (mr?._cleanup) {
+      mr._cleanup();
+      mr._cleanup = undefined;
+    }
+    if (mr && mr.state !== "inactive") {
+      try {
+        mr.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    mediaRecorderRef.current = null;
+    const s = micStreamRef.current;
+    if (s) {
+      s.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    stopRecordingRef.current = stopVoiceRecording;
+  }, [stopVoiceRecording]);
+
+  const startVoiceRecording = useCallback(async () => {
+    if (isRunning || voiceBusy) return;
+    setVoiceError(null);
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const mime =
+        typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm")
+            ? "audio/webm"
+            : "";
+      const chunks = [];
+      mediaChunksRef.current = chunks;
+      const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+      mr.onstop = () => {
+        if (mr._cleanup) {
+          mr._cleanup();
+          mr._cleanup = undefined;
+        }
+        stream.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+        const blob = new Blob(chunks, { type: mr.mimeType || mime || "audio/webm" });
+        if (blob.size < 256) {
+          setVoiceError("Recording too short");
+          return;
+        }
+        void sendVoiceBlob(blob, mr.mimeType || mime || "audio/webm");
+      };
+      mediaRecorderRef.current = mr;
+      mr.start(100);
+      setVoiceRecording(true);
+      const onPointerUp = () => stopRecordingRef.current();
+      window.addEventListener("pointerup", onPointerUp, { passive: true });
+      window.addEventListener("pointercancel", onPointerUp, { passive: true });
+      mr._cleanup = () => {
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+      };
+    } catch (err) {
+      stream?.getTracks?.().forEach((t) => t.stop());
+      setVoiceError(err?.message || "Microphone access denied");
+    }
+  }, [isRunning, voiceBusy, sendVoiceBlob]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        voiceWsRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      const mr = mediaRecorderRef.current;
+      if (mr?._cleanup) mr._cleanup();
+      if (mr && mr.state !== "inactive") {
+        try {
+          mr.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      const p = voicePendingRef.current;
+      if (p?.timer) clearTimeout(p.timer);
+    };
+  }, []);
 
   const liveExportAttachments = uniqueAttachmentsFromSteps(liveSteps);
 
@@ -587,7 +955,8 @@ export default function ChatPanel({
     }
   }, [isRunning]);
 
-  const sendMessage = async (text) => {
+  const sendMessage = async (text, options = {}) => {
+    const preserveComposer = options.preserveComposer === true;
     const inputBeforeSend = input;
     const typed = text != null ? String(text).trim() : inputBeforeSend.trim();
     const hasUploading = pendingFiles.some((p) => p.uploading);
@@ -604,7 +973,9 @@ export default function ChatPanel({
       .map((p) => p.filename)
       .filter((n) => typeof n === "string" && n.trim());
 
-    setInput("");
+    if (!preserveComposer) {
+      setInput("");
+    }
     setPendingFiles([]);
     pendingFilesRef.current = [];
     setUploadError(null);
@@ -814,6 +1185,8 @@ export default function ChatPanel({
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
+  sendMessageRef.current = sendMessage;
+
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -923,6 +1296,11 @@ export default function ChatPanel({
               {uploadError}
             </p>
           ) : null}
+          {voiceError ? (
+            <p className="chat-upload-err" role="alert">
+              {voiceError}
+            </p>
+          ) : null}
           {pendingFiles.length > 0 ? (
             <div className="pending-attachments" aria-label="Files to send with next message">
               {pendingFiles.map((p) => (
@@ -977,6 +1355,24 @@ export default function ChatPanel({
             >
               <IconSpreadsheetAttach />
             </button>
+            <button
+              type="button"
+              className={`chat-voice-btn ${voiceRecording ? "chat-voice-btn--recording" : ""} ${voiceBusy ? "chat-voice-btn--busy" : ""}`}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                if (isRunning || voiceBusy || voiceRecording) return;
+                void startVoiceRecording();
+              }}
+              disabled={isRunning || voiceBusy}
+              title={
+                voiceBusy
+                  ? "Translating speech to English…"
+                  : "Hold to speak — release to send as a message (Sarvam → English)"
+              }
+              aria-label="Hold to speak"
+            >
+              {voiceBusy ? <span className="spin-sm" aria-hidden="true" /> : <IconMic />}
+            </button>
             <textarea
               ref={textareaRef}
               className="chat-input"
@@ -1006,7 +1402,8 @@ export default function ChatPanel({
         </div>
         <div className="input-footer">
           <p className="input-hint">
-            <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> line break · spreadsheet icon attaches CSV/Excel
+            <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> line break · spreadsheet icon attaches CSV/Excel ·
+            mic: hold to speak (sends English transcript automatically)
             {pendingFiles.some((p) => p.uploading) ? (
               <span className="input-hint--dim"> · wait for uploads to finish before sending</span>
             ) : null}

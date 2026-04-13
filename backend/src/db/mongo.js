@@ -18,6 +18,8 @@ export async function connectMongo() {
   db = client.db(name);
   await db.collection("sessions").createIndex({ updatedAt: -1 });
   await db.collection("users").createIndex({ email: 1 }, { unique: true });
+  await db.collection("voice_inputs").createIndex({ userId: 1, streamId: 1, segmentIndex: 1 });
+  await db.collection("voice_inputs").createIndex({ userId: 1, createdAt: -1 });
   console.log(`[mongo] Connected (${name})`);
   return db;
 }
