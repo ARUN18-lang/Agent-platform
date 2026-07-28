@@ -8,9 +8,21 @@ import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
 const require = createRequire(import.meta.url);
-const ytmcpServerPath = require.resolve("@mrsknetwork/ytmcp/build/server/index.js");
-const mermaidMcpServerPath = require.resolve("@narasimhaponnada/mermaid-mcp-server/dist/index.js");
-const e2bMcpServerPath = require.resolve("@e2b/mcp-server/build/index.js");
+
+/** Resolve an optional package path; missing deps must not crash process boot. */
+function safeResolve(specifier) {
+  try {
+    return require.resolve(specifier);
+  } catch {
+    return null;
+  }
+}
+
+const ytmcpServerPath = safeResolve("@mrsknetwork/ytmcp/build/server/index.js");
+const mermaidMcpServerPath = safeResolve("@narasimhaponnada/mermaid-mcp-server/dist/index.js");
+const e2bMcpServerPath = safeResolve("@e2b/mcp-server/build/index.js");
+/** Bundled path — avoids `npx -y` on Render (slow / times out MCP handshake). */
+const githubMcpServerPath = safeResolve("@modelcontextprotocol/server-github/dist/index.js");
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -19,13 +31,17 @@ import {
   getWebServerStatus,
   isWebSearchEnabled,
 } from "../tools/webSearch.js";
+import {
+  getLocalCodeRunnerOpenAITools,
+  executeLocalCodeRunnerTool,
+  getLocalCodeRunnerStatus,
+  isLocalCodeRunnerEnabled,
+} from "../tools/localCodeRunner.js";
 
 const __mcpDir = path.dirname(fileURLToPath(import.meta.url));
 const googleWorkspaceMcpPath = path.resolve(__mcpDir, "google-workspace-mcp/index.js");
 const whatsappCloudMcpPath = path.resolve(__mcpDir, "whatsapp-cloud-mcp/index.js");
 const richPptMcpPath = path.resolve(__mcpDir, "rich-ppt-mcp/index.js");
-/** Bundled path — avoids `npx -y` on Render (slow / times out MCP handshake). */
-const githubMcpServerPath = require.resolve("@modelcontextprotocol/server-github/dist/index.js");
 
 /** @param {string} key */
 function envTruthy(key) {
@@ -50,7 +66,7 @@ const INTEGRATIONS = [
       "Search repositories, triage issues, and reason about pull requests and code without leaving your workspace.",
     command: process.execPath,
     args: [githubMcpServerPath],
-    enabled: () => !envFlagOn("GITHUB_MCP_DISABLE"),
+    enabled: () => Boolean(githubMcpServerPath) && !envFlagOn("GITHUB_MCP_DISABLE"),
     requiredEnv: ["GITHUB_TOKEN"],
     buildEnv: () => ({
       GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN,
@@ -208,7 +224,7 @@ const INTEGRATIONS = [
       envTruthy("YOUTUBE_API_KEY")
         ? [ytmcpServerPath, process.env.YOUTUBE_API_KEY]
         : [ytmcpServerPath],
-    enabled: () => envFlagOn("YOUTUBE_MCP_ENABLE"),
+    enabled: () => Boolean(ytmcpServerPath) && envFlagOn("YOUTUBE_MCP_ENABLE"),
     requiredEnv: [],
     buildEnv: () => {
       const env = {};
@@ -237,7 +253,7 @@ const INTEGRATIONS = [
       "Turn explanations into flowcharts, sequence diagrams, and architecture sketches—rendered as diagrams you can drop straight into docs or slides.",
     command: process.execPath,
     args: [mermaidMcpServerPath],
-    enabled: () => envFlagOn("MERMAID_MCP_ENABLE"),
+    enabled: () => Boolean(mermaidMcpServerPath) && envFlagOn("MERMAID_MCP_ENABLE"),
     requiredEnv: [],
     buildEnv: () => ({}),
     setupGuide:
@@ -265,7 +281,7 @@ const INTEGRATIONS = [
       "Execute Python in a secure cloud sandbox—pandas, NumPy, statistics, and matplotlib charts for analysis, finance-style models, and reproducible numeric results.",
     command: process.execPath,
     args: [e2bMcpServerPath],
-    enabled: () => envFlagOn("E2B_MCP_ENABLE"),
+    enabled: () => Boolean(e2bMcpServerPath) && envFlagOn("E2B_MCP_ENABLE"),
     requiredEnv: ["E2B_API_KEY"],
     buildEnv: () => ({ E2B_API_KEY: process.env.E2B_API_KEY }),
     setupGuide:
@@ -430,12 +446,16 @@ class MCPClientManager {
     }
 
     openaiTools.push(...getWebSearchOpenAITools());
+    openaiTools.push(...getLocalCodeRunnerOpenAITools());
     return openaiTools;
   }
 
   async executeTool(namespacedName, args) {
     if (namespacedName.startsWith("web__")) {
       return executeWebSearchTool(namespacedName, args);
+    }
+    if (namespacedName.startsWith("local__")) {
+      return executeLocalCodeRunnerTool(namespacedName, args);
     }
 
     const [serverKey, ...toolParts] = namespacedName.split("__");
@@ -461,6 +481,8 @@ class MCPClientManager {
     }));
     const web = getWebServerStatus();
     if (web) rows.push(web);
+    const local = getLocalCodeRunnerStatus();
+    if (local) rows.push(local);
     return rows;
   }
 
@@ -513,6 +535,29 @@ class MCPClientManager {
       });
     }
 
+    if (isLocalCodeRunnerEnabled()) {
+      const loc = getLocalCodeRunnerStatus();
+      base.push({
+        key: "local",
+        label: loc.label,
+        icon: loc.icon,
+        state: "connected",
+        toolCount: loc.toolCount,
+        tools: loc.tools,
+      });
+    } else {
+      base.push({
+        key: "local",
+        label: "Local code runner",
+        icon: "💻",
+        state: "unavailable",
+        skipReason: "disabled",
+        missingEnv: [],
+        setupGuide:
+          "Set LOCAL_CODE_RUNNER_ENABLE=1 in backend/.env. Optional: Docker for stronger isolation (LOCAL_CODE_MODE=auto uses Docker when available). See LOCAL_CODE_* in .env.example.",
+      });
+    }
+
     return base;
   }
 
@@ -532,6 +577,14 @@ class MCPClientManager {
       description:
         "Ground answers in current news, documentation, and the public web when your private apps do not hold the answer.",
       connected: isWebSearchEnabled(),
+    });
+    list.push({
+      key: "local",
+      label: "Local code runner",
+      icon: "💻",
+      description:
+        "Run Python, JavaScript, or optional shell in a temp workspace on the server; Docker mode disables network and caps memory when Docker is available.",
+      connected: isLocalCodeRunnerEnabled(),
     });
     return list;
   }
